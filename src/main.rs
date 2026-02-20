@@ -1,7 +1,9 @@
 use std::collections::{BinaryHeap, HashMap};
-use std::fs;
+use std::hint::black_box;
+use std::{fs, vec};
 use std::cmp::{Ordering, Reverse};
 
+use iced::alignment::Vertical::Bottom;
 use iced::{Background, Color, Element, Length, alignment, Task, Event, Subscription, event, window};
 use iced::widget::{column, container, Text};
 
@@ -19,28 +21,35 @@ enum Message {
 }
 
 #[derive(Debug)]
-struct HuffNode {
-    byte: Option<u8>,
+struct HuffData {
+    byte: u8,
     freq: u64,
-    left: Option<Box<HuffNode>>,
-    right: Option<Box<HuffNode>>
 }
 
-impl PartialEq for HuffNode {
+#[derive(Debug)]
+struct Layer {
+    encoded : HashMap<u8, u8>, //(incoded, prefix)
+    chunk: Chunk,
+}
+
+#[derive(Debug)]
+struct Chunk {
+    block: Vec<u8>,
+    unused: u8 //unused bits on the end of chunk
+}
+
+impl PartialEq for HuffData {
     fn eq(&self, other: &Self) -> bool {
         self.freq == other.freq
     }
 }
-
-impl Eq for HuffNode {}
-
-impl PartialOrd for HuffNode {
+impl Eq for HuffData {}
+impl PartialOrd for HuffData {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.freq.cmp(&other.freq))
     }
 }
-
-impl Ord for HuffNode {
+impl Ord for HuffData {
     fn cmp(&self, other: &Self) -> Ordering {
         self.freq.cmp(&other.freq)
     }
@@ -70,77 +79,72 @@ fn encode_file(api: &mut Apy) {
     let mut heap = BinaryHeap::new();
     
     for (byte, freq) in map {
-        heap.push(Reverse(Box::new(HuffNode { byte: Some(byte), freq, left: None, right: None })));
+        heap.push(Box::new(HuffData{ byte, freq }));
     }
 
-    while heap.len() > 1 {
-        let Reverse(left) = heap.pop().unwrap();
-        let Reverse(right) = heap.pop().unwrap();
+    let mut layer1 = Layer {
+        encoded: HashMap::new(),
+        chunk: Chunk { block: Vec::new(), unused: 0 },
+    };
 
-        let morg = Box::new(HuffNode {
-            byte: None,
-            freq: left.freq + right.freq,
-            left: Some(left),
-            right: Some(right),
-        });
-
-        heap.push(Reverse(morg));
-    }
-
-    let mut codes = HashMap::new();
-    let root = heap.pop().unwrap().0;
-    println!("{}", root.freq);
-    build_codes_bits(&root, 0, 0, &mut codes);
+    fill_layer(&mut layer1, &mut heap);
 
     let mut buffer: u8 = 0;
     let mut bit_count: u8 = 0;
     let mut output: Vec<u8> = Vec::new();
 
+    let mut left_over: Chunk = Chunk { block:Vec::new(), unused: 0 };
+
     for byte in &bytes {
-        let (prefix, length) = codes[byte];
-        for i in (0..length).rev()  {
-            let bit = ((prefix >> i) & 1) as u8;
-            buffer = (buffer << 1) | bit;
-            bit_count += 1;
-            if bit_count == 8 {
-                output.push(buffer);
-                buffer = 0;
-                bit_count = 0;
+        if layer1.encoded.contains_key(byte) {
+            let prefix = layer1.encoded[byte];
+            for i in (0..3).rev() {
+                buffer = (buffer << 1) | (prefix >> i & 1);
+                bit_count += 1;
+
+                if bit_count == 8 {
+                    layer1.chunk.block.push(buffer);
+                    buffer = 0;
+                    bit_count = 0;
+                }
             }
         }
-    }
-    if bit_count > 0 {
-        let left_over: u8 = 8-bit_count;
-        buffer <<= left_over;
-        output.push(buffer);
+        else {
+            for _i in 0..3 {
+                buffer <<= 1;
+                bit_count += 1;
+                if bit_count == 8 {
+                    layer1.chunk.block.push(buffer);
+                    buffer = 0;
+                    bit_count = 0;
+                }
+            }
+            left_over.block.push(*byte);
+            //this is where recursion can accure with multiple layers
+        }
+        if bit_count > 0 {
+            layer1.chunk.unused = 8 - bit_count;
+            layer1.chunk.block.push(buffer <<  layer1.chunk.unused);
+        }
+
+
+
     }
 
     let output_path: String = format!("{}.loli", api.file_path.split('.').next().unwrap());
     fs::write(output_path, output).expect("cant write encoded data");
 }
 
-fn build_codes_bits(node: &Box<HuffNode>, prefix: u8, length: u8, codes: &mut HashMap<u8, (u8, u8)>) {
-    if let Some(byte) = node.byte {
-        println!("{:b}; {:b}; {}", byte, prefix, length);
-        if length == 0{
-        codes.insert(byte, (prefix, length+1));
-        }
-        else {
-            codes.insert(byte, (prefix, length));
-        }
-    } else {
-        if let Some(ref l) = node.left {
-            if prefix>0 {
-            build_codes_bits(l, prefix << 1 | 0, length + 1, codes);
-            } else {
-                build_codes_bits(l, prefix << 1 | 0, length, codes);
-            }
-        }
-        if let Some(ref r) = node.right {
-            build_codes_bits(r, prefix << 1 | 1, length + 1, codes);
-        }
+fn fill_layer(layer: &mut Layer, heap: &mut BinaryHeap<Box<HuffData>>){
+    for i in 1..8 {
+        let node = *heap.pop().unwrap();
+        layer.encoded.insert(node.byte, i);
     }
 }
+
+
+
+// ui stuff
 
 fn update(api: &mut Apy, message: Message) {
     match message {
