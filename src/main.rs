@@ -1,9 +1,7 @@
 use std::collections::{BinaryHeap, HashMap};
-use std::hint::black_box;
-use std::{fs, vec};
-use std::cmp::{Ordering, Reverse};
+use std::{fs};
+use std::cmp::{Ordering};
 
-use iced::alignment::Vertical::Bottom;
 use iced::{Background, Color, Element, Length, alignment, Task, Event, Subscription, event, window};
 use iced::widget::{column, container, Text};
 
@@ -30,6 +28,9 @@ struct HuffData {
 struct Layer {
     encoded : HashMap<u8, u8>, //(incoded, prefix)
     chunk: Chunk,
+
+    buffer: u8,
+    bit_count: u8
 }
 
 #[derive(Debug)]
@@ -72,6 +73,7 @@ fn new() -> (Apy, Task<Message>) {
 fn encode_file(api: &mut Apy) {
     let bytes: Vec<u8> = fs::read(&api.file_path).expect("failed to read file");
     let mut map: HashMap<u8, u64> = HashMap::new();
+
     for item in &bytes {
         *map.entry(*item).or_insert(0) += 1;
     }
@@ -82,63 +84,90 @@ fn encode_file(api: &mut Apy) {
         heap.push(Box::new(HuffData{ byte, freq }));
     }
 
-    let mut layer1 = Layer {
-        encoded: HashMap::new(),
-        chunk: Chunk { block: Vec::new(), unused: 0 },
-    };
+    let mut current_count: u64 = 0;
+    let mut layers: Vec<Layer> = Vec::new();
+    println!("{}", bytes.len());
+    while layers.len() < 1 {
+        let mut layer = Layer {
+            encoded: HashMap::new(),
+            chunk: Chunk { block: Vec::new(), unused: 0 },
+            buffer: 0,
+            bit_count: 0
+        };
 
-    fill_layer(&mut layer1, &mut heap);
-
-    let mut buffer: u8 = 0;
-    let mut bit_count: u8 = 0;
-    let mut output: Vec<u8> = Vec::new();
+        current_count += fill_layer(&mut layer, &mut heap);
+        layers.push(layer);
+    }
+    println!("sum:{}", current_count);
 
     let mut left_over: Chunk = Chunk { block:Vec::new(), unused: 0 };
 
-    for byte in &bytes {
-        if layer1.encoded.contains_key(byte) {
-            let prefix = layer1.encoded[byte];
-            for i in (0..3).rev() {
-                buffer = (buffer << 1) | (prefix >> i & 1);
-                bit_count += 1;
 
-                if bit_count == 8 {
-                    layer1.chunk.block.push(buffer);
-                    buffer = 0;
-                    bit_count = 0;
-                }
-            }
-        }
-        else {
-            for _i in 0..3 {
-                buffer <<= 1;
-                bit_count += 1;
-                if bit_count == 8 {
-                    layer1.chunk.block.push(buffer);
-                    buffer = 0;
-                    bit_count = 0;
-                }
-            }
-            left_over.block.push(*byte);
-            //this is where recursion can accure with multiple layers
-        }
-        if bit_count > 0 {
-            layer1.chunk.unused = 8 - bit_count;
-            layer1.chunk.block.push(buffer <<  layer1.chunk.unused);
-        }
-
-
-
+    for encode in &layers.first().unwrap().encoded {
+        println!("{:16b} {:8b}", encode.0, encode.1);
     }
+
+    for byte in &bytes {
+            encode_onto_layer(&mut layers, 0, byte, &mut left_over);
+    }
+
+    
+    let mut output: Vec<u8> = Vec::new();
+    output.extend_from_slice("LOLI 1".as_bytes());
+    /* 
+    for layer in &layers {
+    }*/
+        for item in &layers.first().unwrap().encoded {
+            output.push(*item.0);
+            output.push(*item.1);
+        }
+        output.extend_from_slice(&layers.first().unwrap().chunk.block);
+    output.extend_from_slice(&left_over.block);
 
     let output_path: String = format!("{}.loli", api.file_path.split('.').next().unwrap());
     fs::write(output_path, output).expect("cant write encoded data");
 }
 
-fn fill_layer(layer: &mut Layer, heap: &mut BinaryHeap<Box<HuffData>>){
+fn fill_layer(layer: &mut Layer, heap: &mut BinaryHeap<Box<HuffData>>) -> u64{
+    let mut freq_sum = 0;
     for i in 1..8 {
         let node = *heap.pop().unwrap();
+        print!("{}; ", node.freq);
         layer.encoded.insert(node.byte, i);
+        freq_sum += node.freq;
+    }
+    freq_sum
+}
+
+fn encode_onto_layer(layers: &mut Vec<Layer>, index: u8, data: &u8, left_over: &mut Chunk) {
+    let layer = &mut layers[index as usize];
+    if layer.encoded.contains_key(data) {
+        let prefix = layer.encoded[data];
+        for i in (0..3).rev() {
+            layer.buffer = (layer.buffer << 1) | ((prefix >> i) & 1);
+            layer.bit_count += 1;
+            if layer.bit_count == 8 {
+                layer.chunk.block.push(layer.buffer);
+                layer.buffer = 0;
+                layer.bit_count = 0;
+            }
+        }
+    } else {
+        for _i in 0..3 {
+            layer.buffer <<= 1;
+            layer.bit_count += 1;
+            if layer.bit_count == 8 {
+                layer.chunk.block.push(layer.buffer);
+                layer.buffer = 0;
+                layer.bit_count = 0;
+            }
+        }
+        if layers.len() -1 == index as usize {
+            left_over.block.push(*data);
+        } else {
+            //encode_onto_layer(layers, index+1, data, left_over);
+            left_over.block.push(*data);
+        }
     }
 }
 
