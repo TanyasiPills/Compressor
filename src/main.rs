@@ -1,6 +1,6 @@
 use std::collections::{BinaryHeap, HashMap};
-use std::fs;
-use std::cmp::{Ordering, Reverse};
+use std::{fs};
+use std::cmp::{Ordering};
 
 use iced::{Background, Color, Element, Length, alignment, Task, Event, Subscription, event, window};
 use iced::widget::{column, container, Text};
@@ -21,28 +21,38 @@ enum Message {
 }
 
 #[derive(Debug)]
-struct HuffNode {
-    byte: Option<u8>,
+struct HuffData {
+    byte: u8,
     freq: u64,
-    left: Option<Box<HuffNode>>,
-    right: Option<Box<HuffNode>>
 }
 
-impl PartialEq for HuffNode {
+#[derive(Debug)]
+struct Layer {
+    encoded : HashMap<u8, u8>, //(incoded, prefix)
+    chunk: Chunk,
+
+    buffer: u8,
+    bit_count: u8
+}
+
+#[derive(Debug)]
+struct Chunk {
+    block: Vec<u8>,
+    unused: u8 //unused bits on the end of chunk
+}
+
+impl PartialEq for HuffData {
     fn eq(&self, other: &Self) -> bool {
         self.freq == other.freq
     }
 }
-
-impl Eq for HuffNode {}
-
-impl PartialOrd for HuffNode {
+impl Eq for HuffData {}
+impl PartialOrd for HuffData {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.freq.cmp(&other.freq))
     }
 }
-
-impl Ord for HuffNode {
+impl Ord for HuffData {
     fn cmp(&self, other: &Self) -> Ordering {
         self.freq.cmp(&other.freq)
     }
@@ -80,6 +90,7 @@ fn new() -> (Apy, Task<Message>) {
 fn encode_file(api: &mut Apy) {
     let bytes: Vec<u8> = fs::read(&api.file_path).expect("failed to read file");
     let mut map: HashMap<u8, u64> = HashMap::new();
+
     for item in &bytes {
         *map.entry(*item).or_insert(0) += 1;
     }
@@ -90,68 +101,99 @@ fn encode_file(api: &mut Apy) {
     let mut heap = BinaryHeap::new();
     
     for (byte, freq) in map {
-        heap.push(Reverse(Box::new(HuffNode { byte: Some(byte), freq, left: None, right: None })));
+        heap.push(Box::new(HuffData{ byte, freq }));
     }
 
-    while heap.len() > 1 {
-        let Reverse(left) = heap.pop().unwrap();
-        let Reverse(right) = heap.pop().unwrap();
+    let mut current_count: u64 = 0;
+    let mut layers: Vec<Layer> = Vec::new();
+    println!("{}", bytes.len());
+    while layers.len() < 1 {
+        let mut layer = Layer {
+            encoded: HashMap::new(),
+            chunk: Chunk { block: Vec::new(), unused: 0 },
+            buffer: 0,
+            bit_count: 0
+        };
 
-        let morg = Box::new(HuffNode {
-            byte: None,
-            freq: left.freq + right.freq,
-            left: Some(left),
-            right: Some(right),
-        });
-
-        heap.push(Reverse(morg));
+        current_count += fill_layer(&mut layer, &mut heap);
+        layers.push(layer);
     }
+    println!("sum:{}", current_count);
 
-    let mut codes = HashMap::new();
-    let root = heap.pop().unwrap().0;
-    println!("{}", root.freq);
-    build_codes_bits(&root, 0, 0, &mut codes);
+    let mut left_over: Chunk = Chunk { block:Vec::new(), unused: 0 };
 
-    let mut buffer: u8 = 0;
-    let mut bit_count: u8 = 0;
-    let mut output: Vec<u8> = Vec::new();
+
+    for encode in &layers.first().unwrap().encoded {
+        println!("{:16b} {:8b}", encode.0, encode.1);
+    }
 
     for byte in &bytes {
-        let (prefix, length) = codes[byte];
-        for i in (0..length).rev()  {
-            let bit = ((prefix >> i) & 1) as u8;
-            buffer = (buffer << 1) | bit;
-            bit_count += 1;
-            if bit_count == 8 {
-                output.push(buffer);
-                buffer = 0;
-                bit_count = 0;
-            }
+            encode_onto_layer(&mut layers, 0, byte, &mut left_over);
+    }
+
+    
+    let mut output: Vec<u8> = Vec::new();
+    output.extend_from_slice("LOLI 1".as_bytes());
+    /* 
+    for layer in &layers {
+    }*/
+        for item in &layers.first().unwrap().encoded {
+            output.push(*item.0);
+            output.push(*item.1);
         }
-    }
-    if bit_count > 0 {
-        let left_over: u8 = 8-bit_count;
-        buffer <<= left_over;
-        output.push(buffer);
-    }
+        output.extend_from_slice(&layers.first().unwrap().chunk.block);
+    output.extend_from_slice(&left_over.block);
 
     let output_path: String = format!("{}.loli", api.file_path.split('.').next().unwrap());
     fs::write(output_path, output).expect("cant write encoded data");
 }
 
-fn build_codes_bits(node: &Box<HuffNode>, prefix: u8, length: u8, codes: &mut HashMap<u8, (u8, u8)>) {
-    if let Some(byte) = node.byte {
-        println!("{:8b}; {:8b}; {}", byte, prefix, length.max(1));
-        codes.insert(byte, (prefix, length.max(1)));
-    } else {
-        if let Some(ref l) = node.left {
-            build_codes_bits(l, prefix << 1 | 0, length + 1, codes);
+fn fill_layer(layer: &mut Layer, heap: &mut BinaryHeap<Box<HuffData>>) -> u64{
+    let mut freq_sum = 0;
+    for i in 1..8 {
+        let node = *heap.pop().unwrap();
+        print!("{}; ", node.freq);
+        layer.encoded.insert(node.byte, i);
+        freq_sum += node.freq;
+    }
+    freq_sum
+}
+
+fn encode_onto_layer(layers: &mut Vec<Layer>, index: u8, data: &u8, left_over: &mut Chunk) {
+    let layer = &mut layers[index as usize];
+    if layer.encoded.contains_key(data) {
+        let prefix = layer.encoded[data];
+        for i in (0..3).rev() {
+            layer.buffer = (layer.buffer << 1) | ((prefix >> i) & 1);
+            layer.bit_count += 1;
+            if layer.bit_count == 8 {
+                layer.chunk.block.push(layer.buffer);
+                layer.buffer = 0;
+                layer.bit_count = 0;
+            }
         }
-        if let Some(ref r) = node.right {
-            build_codes_bits(r, prefix << 1 | 1, length + 1, codes);
+    } else {
+        for _i in 0..3 {
+            layer.buffer <<= 1;
+            layer.bit_count += 1;
+            if layer.bit_count == 8 {
+                layer.chunk.block.push(layer.buffer);
+                layer.buffer = 0;
+                layer.bit_count = 0;
+            }
+        }
+        if layers.len() -1 == index as usize {
+            left_over.block.push(*data);
+        } else {
+            //encode_onto_layer(layers, index+1, data, left_over);
+            left_over.block.push(*data);
         }
     }
 }
+
+
+
+// ui stuff
 
 fn update(api: &mut Apy, message: Message) {
     match message {
