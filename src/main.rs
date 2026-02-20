@@ -5,6 +5,8 @@ use std::cmp::{Ordering, Reverse};
 use iced::{Background, Color, Element, Length, alignment, Task, Event, Subscription, event, window};
 use iced::widget::{column, container, Text};
 
+use libsais::{BwtConstruction, ThreadCount};
+
 fn main() -> iced::Result {
     iced::application(new, update, view)
     .title("Blahajs for everyone >:3")
@@ -46,6 +48,21 @@ impl Ord for HuffNode {
     }
 }
 
+fn bwt_block(data: &[u8]) -> (Vec<u8>, usize) {
+    let res = BwtConstruction::for_text(data)
+        .with_owned_temporary_array_buffer32()
+        .multi_threaded(ThreadCount::openmp_default())                  
+        .run()
+        .expect("BWT failed");
+
+    let bwt: Vec<u8> = res.bwt().to_vec();
+
+    // get primary index (needed to invert BWT)
+    let orig_idx = res.primary_index();
+
+    (bwt, orig_idx)
+}
+
 #[derive(Debug, Default)]
 struct Apy {
     file_path: String,
@@ -66,6 +83,9 @@ fn encode_file(api: &mut Apy) {
     for item in &bytes {
         *map.entry(*item).or_insert(0) += 1;
     }
+
+    let (bwt, idx) = bwt_block(&bytes[..1024]);
+    println!("got bwt: {} {}", bwt.len(), idx);
 
     let mut heap = BinaryHeap::new();
     
@@ -121,20 +141,11 @@ fn encode_file(api: &mut Apy) {
 
 fn build_codes_bits(node: &Box<HuffNode>, prefix: u8, length: u8, codes: &mut HashMap<u8, (u8, u8)>) {
     if let Some(byte) = node.byte {
-        println!("{:b}; {:b}; {}", byte, prefix, length);
-        if length == 0{
-        codes.insert(byte, (prefix, length+1));
-        }
-        else {
-            codes.insert(byte, (prefix, length));
-        }
+        println!("{:8b}; {:8b}; {}", byte, prefix, length.max(1));
+        codes.insert(byte, (prefix, length.max(1)));
     } else {
         if let Some(ref l) = node.left {
-            if prefix>0 {
             build_codes_bits(l, prefix << 1 | 0, length + 1, codes);
-            } else {
-                build_codes_bits(l, prefix << 1 | 0, length, codes);
-            }
         }
         if let Some(ref r) = node.right {
             build_codes_bits(r, prefix << 1 | 1, length + 1, codes);
