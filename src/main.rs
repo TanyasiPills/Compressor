@@ -35,7 +35,6 @@ struct Layer {
 #[derive(Debug)]
 struct Chunk {
     block: Vec<u8>,
-    unused: u8, //unused bits on the end of chunk
 
     buffer: u8,
     bit_count: u8
@@ -92,18 +91,10 @@ fn encode_file(api: &mut Apy) {
     println!("got bwt: {} {}", bwt.len(), idx);
     let base: u8 = *bwt.first().unwrap();
 
-    let previous = base;
-    let mut bytes: Vec<u8> = Vec::new();
-
-    for item in bwt {
-        bytes.push((item as i16 - previous as i16 + 128) as u8);
-    }
-    println!("got bytes: {}", bytes.len());
-
     let mut map: HashMap<u16, u64> = HashMap::new();
     let mut bit_len = 0;
     let mut bits: u16 = 0;
-    for item in &bytes {
+    for item in &bwt {
         bits <<= 8;
         bits |= *item as u16;
         bit_len += 8;
@@ -127,7 +118,7 @@ fn encode_file(api: &mut Apy) {
     while layers.len() < 7 {
         let mut layer = Layer {
             encoded: HashMap::new(),
-            chunk: Chunk { block: Vec::new(), unused: 0, buffer: 0, bit_count: 0 },
+            chunk: Chunk { block: Vec::new(), buffer: 0, bit_count: 0 },
         };
 
         current_count += fill_layer(&mut layer, &mut heap);
@@ -135,12 +126,12 @@ fn encode_file(api: &mut Apy) {
     }
     println!("sum:{}", current_count);
 
-    let mut main_chunk: Chunk = Chunk { block:Vec::new(), unused: 0, buffer: 0, bit_count: 0 };
-    let mut left_over: Chunk = Chunk { block:Vec::new(), unused: 0, buffer: 0, bit_count: 0 };
+    let mut main_chunk: Chunk = Chunk { block:Vec::new(), buffer: 0, bit_count: 0 };
+    let mut left_over: Chunk = Chunk { block:Vec::new(), buffer: 0, bit_count: 0 };
 
     bits = 0;
     bit_len = 0;
-    for byte in &bytes {
+    for byte in &bwt {
         bits = bits << 8 | *byte as u16;
         bit_len += 8;
 
@@ -181,18 +172,41 @@ fn encode_file(api: &mut Apy) {
     //outputing
 
     let mut output: Vec<u8> = Vec::new();
-    output.extend_from_slice("LOLI 1".as_bytes());
+    output.extend_from_slice("LOLI".as_bytes());
      
-    for layer in &layers {
+    for layer in &mut layers {
         for item in &layer.encoded {
             output.push((*item.0 >> 8) as u8);
             output.push(*item.0 as u8);
             output.push(*item.1);
         }
 
-        output.extend_from_slice(&layer.chunk.block);
+        let not_used: u8 = 8 - layer.chunk.bit_count;
+        if layer.chunk.bit_count > 0 {
+            layer.chunk.block.push(layer.chunk.buffer << not_used);
+        }
+        output.push(not_used % 8);
+
+        output.extend_from_slice(&(layer.chunk.block.len() as u64).to_le_bytes());
     }
 
+    let mut not_used: u8 = 8 - main_chunk.bit_count;
+    if main_chunk.bit_count > 0 {
+        main_chunk.block.push(main_chunk.buffer << not_used);
+    }
+    output.push(not_used % 8);
+
+    not_used = 8 - left_over.bit_count;
+    if left_over.bit_count > 0 {
+        left_over.block.push(left_over.buffer << not_used);
+    }
+    output.push(not_used % 8);
+
+    output.extend_from_slice(&main_chunk.block);
+
+    for layer in &layers {
+        output.extend_from_slice(&layer.chunk.block);
+    }
     output.extend_from_slice(&left_over.block);
 
     let output_path: String = format!("{}.loli", api.file_path.split('.').next().unwrap());
