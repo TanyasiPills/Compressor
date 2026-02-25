@@ -7,6 +7,8 @@ use iced::widget::{column, container, Text};
 
 use libsais::{BwtConstruction, ThreadCount};
 
+use rayon::prelude::*;
+
 fn main() -> iced::Result {
     iced::application(new, update, view)
     .title("Blahajs for everyone >:3")
@@ -70,6 +72,62 @@ fn bwt_block(data: &[u8]) -> (Vec<u8>, usize) {
     (bwt, orig_idx)
 }
 
+fn mtf_encode(bwt: &Vec<u8>) -> Vec<u8> {
+let mut symbols: [u8; 256] = [0; 256];
+    let mut positions: [u8; 256] = [0; 256];
+    for i in 0..=255 {
+        symbols[i] = i as u8;
+        positions[i] = i as u8;
+    }
+
+    let mut output = Vec::with_capacity(bwt.len());
+
+    for &byte in bwt {
+        let pos = positions[byte as usize];
+        output.push(pos);
+
+        // move byte to front
+        for i in (0..pos as usize).rev() {
+            let s = symbols[i];
+            symbols[i + 1] = s;
+            positions[s as usize] += 1;
+        }
+        symbols[0] = byte;
+        positions[byte as usize] = 0;
+    }
+
+    output
+}
+
+fn rle_encode(mtf: &Vec<u8>) -> Vec<u8> {
+    let mut output = Vec::new();
+    let mut zero_run = 0;
+
+    for &val in mtf {
+        if val == 0 {
+            zero_run += 1;
+        } else {
+            while zero_run > 0 {
+                let run = zero_run.min(255);
+                output.push(0);
+                output.push(run as u8);
+                zero_run -= run;
+            }
+
+            output.push(val);
+        }
+    }
+
+    while zero_run > 0 {
+        let run = zero_run.min(255);
+        output.push(0);
+        output.push(run as u8);
+        zero_run -= run;
+    }
+
+    output
+}
+
 #[derive(Debug, Default)]
 struct Apy {
     file_path: String,
@@ -88,13 +146,35 @@ fn encode_file(api: &mut Apy) {
     let file_data: Vec<u8> = fs::read(&api.file_path).expect("failed to read file");
 
     let (bwt, idx) = bwt_block(&file_data);
-    println!("got bwt: {} {}", bwt.len(), idx);
-    let base: u8 = *bwt.first().unwrap();
+    println!("did bwt");
+    let mtf = mtf_encode(&bwt);
+    println!("did mtf");
+    let rle = rle_encode(&mtf);
+    println!("did rle");
+
+    let block_size = 1024;
+    let blocks: Vec<&[u8]> = file_data.chunks(block_size).collect();
+    
+/*
+    let results: Vec<(Vec<u8>, usize)> = blocks
+    .par_iter()
+    .map(|block| {
+        let (bwt, idx) = bwt_block(block);
+        let mtf = mtf_encode(&bwt);
+        let rle = rle_encode(&mtf);
+        (rle, idx)
+
+    })
+    .collect();
+*/
+
+    println!("got data: btw-{} rle-{}", bwt.len(), rle.len());
+
 
     let mut map: HashMap<u16, u64> = HashMap::new();
     let mut bit_len = 0;
     let mut bits: u16 = 0;
-    for item in &bwt {
+    for item in &rle {
         bits <<= 8;
         bits |= *item as u16;
         bit_len += 8;
@@ -131,7 +211,7 @@ fn encode_file(api: &mut Apy) {
 
     bits = 0;
     bit_len = 0;
-    for byte in &bwt {
+    for byte in &rle {
         bits = bits << 8 | *byte as u16;
         bit_len += 8;
 
