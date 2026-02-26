@@ -26,13 +26,13 @@ enum Message {
 
 #[derive(Debug)]
 struct HuffData {
-    byte: u16,
+    byte: u8,
     freq: u64,
 }
 
 #[derive(Debug)]
 struct Layer {
-    encoded : HashMap<u16, u8>, //(incoded, prefix)
+    encoded : HashMap<u8, u8>, //(incoded, prefix)
     chunk: Chunk,
 }
 
@@ -194,18 +194,9 @@ fn encode_file(api: &mut Apy) {
     println!("got data: btw-{} rle-{}", bwt.len(), rle.len());
 
 
-    let mut map: HashMap<u16, u64> = HashMap::new();
-    let mut bit_len = 0;
-    let mut bits: u16 = 0;
+    let mut map: HashMap<u8, u64> = HashMap::new();
     for item in &rle {
-        bits <<= 8;
-        bits |= *item as u16;
-        bit_len += 8;
-        if bit_len == 16 {
-            *map.entry(bits).or_insert(0) += 1;
-            bit_len = 0;
-            bits = 0;
-        }
+        *map.entry(*item).or_insert(0) += 1;
     }
     println!("got map: {}", map.len());
     let mut heap = BinaryHeap::new();
@@ -217,59 +208,39 @@ fn encode_file(api: &mut Apy) {
     
 
     let mut current_count: u64 = 0;
-    let mut layers: Vec<Layer> = Vec::new();
-    while layers.len() < 7 {
-        let mut layer = Layer {
+    let mut layer: Layer = Layer {
             encoded: HashMap::new(),
             chunk: Chunk { block: Vec::new(), buffer: 0, bit_count: 0 },
-        };
+    };
+    current_count = fill_layer(&mut layer, &mut heap);
 
-        current_count += fill_layer(&mut layer, &mut heap);
-        layers.push(layer);
-    }
     println!("sum:{}", current_count);
 
     let mut main_chunk: Chunk = Chunk { block:Vec::new(), buffer: 0, bit_count: 0 };
     let mut left_over: Chunk = Chunk { block:Vec::new(), buffer: 0, bit_count: 0 };
 
-    bits = 0;
-    bit_len = 0;
     for byte in &rle {
-        bits = bits << 8 | *byte as u16;
-        bit_len += 8;
-
-        if bit_len == 16 {
-            if let Some((index, layer)) = layers.iter_mut().enumerate().find(|layer| layer.1.encoded.contains_key(&bits)) {
-                let main_index: u8 = (index+1) as u8; //+1 cause 000 is the main pool
-                for i in (0..3).rev() {
-                    main_chunk.buffer = (main_chunk.buffer << 1) | ((main_index >> i) & 1);
-                    main_chunk.bit_count += 1;
-                    if main_chunk.bit_count == 8 {
-                        main_chunk.block.push(main_chunk.buffer);
-                        main_chunk.buffer = 0;
-                        main_chunk.bit_count = 0;
-                    }
-                }
-                encode_onto_layer(layer, &bits);
+        if layer.encoded.contains_key(byte) {
+            main_chunk.buffer = (main_chunk.buffer << 1) | 1;
+            main_chunk.bit_count += 1;
+            if main_chunk.bit_count == 8 {
+                main_chunk.block.push(main_chunk.buffer);
+                main_chunk.buffer = 0;
+                main_chunk.bit_count = 0;
             }
-            else {
-                for _i in (0..3).rev() {
-                    main_chunk.buffer = main_chunk.buffer << 1;
-                    main_chunk.bit_count += 1;
-                    if main_chunk.bit_count == 8 {
-                        main_chunk.block.push(main_chunk.buffer);
-                        main_chunk.buffer = 0;
-                        main_chunk.bit_count = 0;
-                    }
-                }
-
-                left_over.block.push((bits >> 8) as u8);
-                left_over.block.push(bits as u8);
-            }
-            bits = 0;
-            bit_len = 0;
+            
+            encode_onto_layer(&mut layer, byte);
         }
-
+        else {
+            main_chunk.buffer = main_chunk.buffer << 1;
+            main_chunk.bit_count += 1;
+            if main_chunk.bit_count == 8 {
+                main_chunk.block.push(main_chunk.buffer);
+                main_chunk.buffer = 0;
+                main_chunk.bit_count = 0;
+            }
+            left_over.block.push(*byte);
+        }
     }
     
     //outputing
@@ -277,21 +248,16 @@ fn encode_file(api: &mut Apy) {
     let mut output: Vec<u8> = Vec::new();
     output.extend_from_slice("LOLI".as_bytes());
      
-    for layer in &mut layers {
-        for item in &layer.encoded {
-            output.push((*item.0 >> 8) as u8);
-            output.push(*item.0 as u8);
-            output.push(*item.1);
-        }
-
-        let not_used: u8 = 8 - layer.chunk.bit_count;
-        if layer.chunk.bit_count > 0 {
-            layer.chunk.block.push(layer.chunk.buffer << not_used);
-        }
-        output.push(not_used % 8);
-
-        output.extend_from_slice(&(layer.chunk.block.len() as u64).to_le_bytes());
+    for item in &layer.encoded {
+        output.push(*item.0);
+        output.push(*item.1);
     }
+    let not_used: u8 = 8 - layer.chunk.bit_count;
+    if layer.chunk.bit_count > 0 {
+        layer.chunk.block.push(layer.chunk.buffer << not_used);
+    }
+    output.push(not_used % 8);
+    output.extend_from_slice(&(layer.chunk.block.len() as u64).to_le_bytes());
 
     let mut not_used: u8 = 8 - main_chunk.bit_count;
     if main_chunk.bit_count > 0 {
@@ -307,9 +273,8 @@ fn encode_file(api: &mut Apy) {
 
     output.extend_from_slice(&main_chunk.block);
 
-    for layer in &layers {
-        output.extend_from_slice(&layer.chunk.block);
-    }
+    output.extend_from_slice(&layer.chunk.block);
+    
     output.extend_from_slice(&left_over.block);
 
     let output_path: String = format!("{}.loli", api.file_path.split('.').next().unwrap());
@@ -327,7 +292,7 @@ fn fill_layer(layer: &mut Layer, heap: &mut BinaryHeap<Box<HuffData>>) -> u64{
     freq_sum
 }
 
-fn encode_onto_layer(layer: &mut Layer, data: &u16) {
+fn encode_onto_layer(layer: &mut Layer, data: &u8) {
     let prefix = layer.encoded[data];
     for i in (0..3).rev() {
         layer.chunk.buffer = (layer.chunk.buffer << 1) | ((prefix >> i) & 1);
