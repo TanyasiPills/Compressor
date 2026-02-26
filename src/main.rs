@@ -1,4 +1,6 @@
 use std::collections::{BinaryHeap, HashMap};
+use std::fmt::Binary;
+use std::collections::VecDeque;
 use std::{fs};
 use std::cmp::{Ordering};
 
@@ -73,7 +75,7 @@ fn bwt_block(data: &[u8]) -> (Vec<u8>, usize) {
 }
 
 fn mtf_encode(bwt: &Vec<u8>) -> Vec<u8> {
-let mut symbols: [u8; 256] = [0; 256];
+    let mut symbols: [u8; 256] = [0; 256];
     let mut positions: [u8; 256] = [0; 256];
     for i in 0..=255 {
         symbols[i] = i as u8;
@@ -142,6 +144,27 @@ fn new() -> (Apy, Task<Message>) {
     )
 }
 
+fn decode_file(file_data: Vec<u8>) {
+    let mut heap: VecDeque<_> = file_data.into();
+    let mut map: HashMap<u8, u16> = HashMap::new();
+
+    let mut cur_data: u16 = 0;
+    let mut not_used: u8 = 0;
+    let mut data_len: u64 = 0;
+    for _i in 0..7 {
+        cur_data = heap.pop_front().unwrap() as u16;
+        cur_data <<= 8;
+        cur_data |= heap.pop_front().unwrap() as u16;
+        map.insert(heap.pop_front().unwrap(), cur_data);
+        not_used = heap.pop_front().unwrap();
+
+        for _y in 0..8 {
+            data_len <<= 8;
+            data_len |= heap.pop_front().unwrap() as u64;
+        }
+    } 
+}
+
 fn encode_file(api: &mut Apy) {
     let file_data: Vec<u8> = fs::read(&api.file_path).expect("failed to read file");
 
@@ -152,8 +175,8 @@ fn encode_file(api: &mut Apy) {
     let rle = rle_encode(&mtf);
     println!("did rle");
 
-    let block_size = 1024;
-    let blocks: Vec<&[u8]> = file_data.chunks(block_size).collect();
+    //let block_size = 1024;
+    //let blocks: Vec<&[u8]> = file_data.chunks(block_size).collect();
     
 /*
     let results: Vec<(Vec<u8>, usize)> = blocks
