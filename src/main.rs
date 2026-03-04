@@ -1,5 +1,4 @@
 use std::collections::{BinaryHeap, HashMap};
-use std::fmt::Binary;
 use std::collections::VecDeque;
 use std::{fs};
 use std::cmp::{Ordering};
@@ -8,9 +7,8 @@ use iced::{Background, Color, Element, Length, alignment, Task, Event, Subscript
 use iced::widget::{column, container, Text};
 
 use libsais::bwt::Bwt;
-use libsais::{BwtConstruction, ThreadCount, UnBwt};
-
-use rayon::prelude::*;
+use libsais::typestate::OwnedBuffer;
+use libsais::{BwtConstruction, ThreadCount};
 
 fn main() -> iced::Result {
     iced::application(new, update, view)
@@ -74,18 +72,18 @@ fn bwt_encode(data: &[u8]) -> (Vec<u8>, usize) {
     (test.0, test.1)
 }
 
-fn bwt_decode(mtf: &[u8], main_index: usize) -> Vec<u8> {
-    let mut output: Vec<u8> = Vec::new();
+fn bwt_decode(mtf: &Vec<u8>, main_index: usize) -> Vec<u8> {
+    let output: Vec<u8>;
+
     unsafe {
-        let mut data= 
-             Bwt::<u8, _>::from_parts(mtf, main_index)
+        output = Bwt::<u8, OwnedBuffer>::from_parts(mtf.clone(), main_index)
             .unbwt()
             .with_owned_temporary_array_buffer32()
             .multi_threaded(ThreadCount::openmp_default())
             .run()
-            .unwrap();
-
-        output = data.as_slice().to_vec();
+            .unwrap()
+            .as_slice()
+            .to_vec();
     }
 
     output
@@ -209,7 +207,8 @@ fn get_prefix(data: &Vec<u8>, index: &mut usize, bit: &mut u8) -> u8 {
     let mut byte = data[*index];
 
     while count != 3 {
-        prefix = (prefix << 1) | (byte & 1);
+        let bit_val = (byte >> (7 - *bit)) & 1;
+        prefix = (prefix << 1) | bit_val;
         count += 1;
 
         *bit += 1;
@@ -240,13 +239,17 @@ fn decode_file(file_path: String) {
         buf[i] = heap.pop_front().unwrap();
     }
 
-    if &buf != b"loli" {
+    if &buf != b"LOLI" {
         println!("Got bamboozled, the file is not even a loli");
         return
     }
 
     //we retrive the bwt encoding index
-    let bwt_index = heap.pop_front();
+    let mut buf = [0u8; 8];
+    for i in 0..8 {
+        buf[i] = heap.pop_front().unwrap();
+    }
+    let bwt_index = u64::from_le_bytes(buf) as usize;
 
     //we get the huffman coding map
     for _i in 0..8 {
@@ -254,15 +257,20 @@ fn decode_file(file_path: String) {
         map.insert(heap.pop_front().unwrap(), encoded);
     }
 
+    for item in &map {
+        println!("map entry: {};{}", item.0, item.1);
+    }
+
     //we get the not used bits count
     for _i in 0..3 { not_used.push(heap.pop_front().unwrap()) }
 
     //we get the size of the data chunks
     for _i in 0..3 { 
-        let mut cur_len: usize = 0;
-        for _y in 0..8 {
-            cur_len = (cur_len << 8) | (heap.pop_front().unwrap() as usize);
+        let mut buf = [0u8; 8];
+        for i in 0..8 {
+            buf[i] = heap.pop_front().unwrap();
         }
+        let cur_len = u64::from_le_bytes(buf) as usize;
         data_len.push(cur_len as usize);
     }
 
@@ -274,19 +282,31 @@ fn decode_file(file_path: String) {
     let mut layer_index: usize = 0;
     let mut layer_bit: u8 = 0;
 
+    let total_bits = main_chunk.len() * 8 - not_used[0] as usize;
+
+    let mut bits_read = 0;
+
     //undoing huffman coding
     for byte in &main_chunk {
         for i in (0..8).rev() {
+            if bits_read == total_bits {
+                break;
+            }
+
             let bit = (byte >> i) & 1;
+            bits_read += 1;
+
             if bit == 1 { original.push(map[&get_prefix(&layer_chunk, &mut layer_index, &mut layer_bit)]) } 
             else { original.push(leftover_chunk.pop_front().unwrap()) };
         }
     }
 
+    original = rle_decode(&original);
+    original = mtf_decode(&original);
+    original = bwt_decode(&original, bwt_index);
 
 
-
-    let output_path: String = format!("{}.gif", file_path.split('.').next().unwrap());
+    let output_path: String = format!("{}unlolied.gif", file_path.split('.').next().unwrap());
     fs::write(output_path, original).expect("cant write decoded data");
 
 }
@@ -333,7 +353,7 @@ fn encode_file(file_path: String) {
     println!("got heap: {}", heap.len());
     
 
-    let mut current_count: u64 = 0;
+    let current_count: u64;
     let mut layer: Layer = Layer {
             encoded: HashMap::new(),
             chunk: Chunk { block: Vec::new(), buffer: 0, bit_count: 0 },
@@ -410,7 +430,7 @@ fn encode_file(file_path: String) {
 
 fn fill_layer(layer: &mut Layer, heap: &mut BinaryHeap<Box<HuffData>>) -> u64{
     let mut freq_sum = 0;
-    for i in 1..=8 {
+    for i in 0..8 {
         let node: HuffData = *heap.pop().unwrap();
         print!("{}; ", node.freq);
         layer.encoded.insert(node.byte, i);
