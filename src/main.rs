@@ -186,9 +186,88 @@ fn rle_decode(data: &Vec<u8>) -> Vec<u8> {
     output
 }
 
+//^^^^old right there
+
 #[derive(Debug, Default)]
 struct Apy {
     file_path: String,
+}
+
+#[derive(Debug)]
+struct ANSTable {
+    freq: Vec<u32>,       // frequency of each symbol
+    cumul: Vec<u32>,      // cumulative frequency (where each symbol starts)
+    total: u32,           // sum of all frequencies
+
+    slot_to_sym: Vec<u8>,
+}
+
+#[derive(Debug)]
+struct ANSEncoder {
+    state: u64,
+    output: Vec<u8>
+}
+#[derive(Debug)]
+struct ANSDecoder {
+    state: u64,
+    input: Vec<u8>,
+    pos: usize
+}
+
+const L: u64 = 1 << 23;
+
+fn ANSCreateTable() {
+    
+}
+
+fn ANSEncoding(symbol: u8, encoder: &mut ANSEncoder, table: &ANSTable) {
+    let m = table.total as u64;
+    let freq = table.freq[symbol as usize] as u64;
+    let cumul = table.cumul[symbol as usize] as u64;
+
+    let upper = ((L / freq) * freq) << 8;
+    while encoder.state >= upper {
+    // Flush lowest byte to output
+        encoder.output.push((encoder.state & 0xFF) as u8);
+        encoder.state >>= 8;
+    }
+
+    encoder.state = (encoder.state / freq) * m + cumul + (encoder.state % freq);
+}
+
+fn ANSCloseEncoding(encoder: &mut ANSEncoder){
+    for _i in 0..4 {
+        encoder.output.push((encoder.state & 0xFF) as u8);
+        encoder.state >>= 8;
+    }
+    encoder.output.reverse();
+}
+
+fn ANSDecoding(decoder: &mut ANSDecoder, table: &ANSTable) -> u8 {
+    //loading some goodies into the state first
+    decoder.state = 0u64;
+    for i in 0..4 {
+        decoder.state |= (decoder.input[i] as u64) << (i * 8);
+    }
+    decoder.pos = 4;
+
+    let m = table.total as u64;
+    let slot = decoder.state % m;
+    let symbol = table.slot_to_sym[slot as usize];
+
+    let freq = table.freq[symbol as usize] as u64;
+    let cumul = table.cumul[symbol as usize] as u64;
+
+    //popping the symbol out of the state
+    decoder.state = freq * (decoder.state / m) + slot - cumul;
+
+    while decoder.state < L {
+        let byte = decoder.input[decoder.pos] as u64;
+        decoder.pos += 1;
+        decoder.state = (decoder.state << 8) | byte;
+    }
+
+    symbol
 }
 
 fn new() -> (Apy, Task<Message>) {
@@ -199,6 +278,9 @@ fn new() -> (Apy, Task<Message>) {
         Task::none(),
     )
 }
+
+
+//ˇˇˇˇˇˇold down there
 
 fn get_prefix(data: &Vec<u8>, index: &mut usize, bit: &mut u8) -> u8 {
     let mut count: u8 = 0;
