@@ -3,12 +3,14 @@ use std::collections::VecDeque;
 use std::{fs};
 use std::cmp::{Ordering};
 
+use iced::futures::stream::ForEach;
 use iced::{Background, Color, Element, Length, alignment, Task, Event, Subscription, event, window};
-use iced::widget::{column, container, Text};
+use iced::widget::{Button, Text, button, column, container, row};
 
 use libsais::bwt::Bwt;
 use libsais::typestate::OwnedBuffer;
 use libsais::{BwtConstruction, ThreadCount};
+use rfd::FileDialog;
 
 fn main() -> iced::Result {
     iced::application(new, update, view)
@@ -20,177 +22,9 @@ fn main() -> iced::Result {
 #[derive(Debug, Clone)]
 enum Message {
     None,
-    FileDropped(String)
-}
-
-#[derive(Debug)]
-struct HuffData {
-    byte: u8,
-    freq: u64,
-}
-
-#[derive(Debug)]
-struct Layer {
-    encoded : HashMap<u8, u8>, //(incoded, prefix)
-    chunk: Chunk,
-}
-
-#[derive(Debug)]
-struct Chunk {
-    block: Vec<u8>,
-
-    buffer: u8,
-    bit_count: u8
-}
-
-impl PartialEq for HuffData {
-    fn eq(&self, other: &Self) -> bool {
-        self.freq == other.freq
-    }
-}
-impl Eq for HuffData {}
-impl PartialOrd for HuffData {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.freq.cmp(&other.freq))
-    }
-}
-impl Ord for HuffData {
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.freq.cmp(&other.freq)
-    }
-}
-
-fn bwt_encode(data: &[u8]) -> (Vec<u8>, usize) {
-    let res = BwtConstruction::for_text(data)
-        .with_owned_temporary_array_buffer32()
-        .multi_threaded(ThreadCount::openmp_default())                  
-        .run()
-        .expect("BWT failed");
-
-    let test = res.into_parts();
-
-    (test.0, test.1)
-}
-
-fn bwt_decode(mtf: &Vec<u8>, main_index: usize) -> Vec<u8> {
-    let output: Vec<u8>;
-
-    unsafe {
-        output = Bwt::<u8, OwnedBuffer>::from_parts(mtf.clone(), main_index)
-            .unbwt()
-            .with_owned_temporary_array_buffer32()
-            .multi_threaded(ThreadCount::openmp_default())
-            .run()
-            .unwrap()
-            .as_slice()
-            .to_vec();
-    }
-
-    output
-}
-
-fn mtf_encode(bwt: &Vec<u8>) -> Vec<u8> {
-    let mut symbols: [u8; 256] = [0; 256];
-    let mut positions: [u8; 256] = [0; 256];
-    for i in 0..=255 {
-        symbols[i] = i as u8;
-        positions[i] = i as u8;
-    }
-
-    let mut output = Vec::with_capacity(bwt.len());
-
-    for &byte in bwt {
-        let pos = positions[byte as usize];
-        output.push(pos);
-
-        // move byte to front
-        for i in (0..pos as usize).rev() {
-            let s = symbols[i];
-            symbols[i + 1] = s;
-            positions[s as usize] += 1;
-        }
-        symbols[0] = byte;
-        positions[byte as usize] = 0;
-    }
-
-    output
-}
-
-fn mtf_decode(rle: &Vec<u8>) -> Vec<u8> {
-    let mut symbols = [0u8; 256];
-    for i in 0..=255 {
-        symbols[i] = i as u8;
-    }
-
-    let mut output = Vec::with_capacity(rle.len());
-
-    for &pos in rle {
-        let idx = pos as usize;
-        let byte = symbols[idx];
-        output.push(byte);
-
-        // move to front
-        for i in (1..=idx).rev() {
-            symbols[i] = symbols[i - 1];
-        }
-        symbols[0] = byte;
-    }
-
-    output    
-}
-
-fn rle_encode(mtf: &Vec<u8>) -> Vec<u8> {
-    let mut output = Vec::new();
-    let mut zero_run = 0;
-
-    for &val in mtf {
-        if val == 0 {
-            zero_run += 1;
-        } else {
-            while zero_run > 0 {
-                let run = zero_run.min(255);
-                output.push(0);
-                output.push(run as u8);
-                zero_run -= run;
-            }
-
-            output.push(val);
-        }
-    }
-
-    while zero_run > 0 {
-        let run = zero_run.min(255);
-        output.push(0);
-        output.push(run as u8);
-        zero_run -= run;
-    }
-
-    output
-}
-
-fn rle_decode(data: &Vec<u8>) -> Vec<u8> {
-    let mut output = Vec::new();
-    let mut i = 0;
-
-    while i < data.len() {
-        if data[i] == 0 {
-            let run = data[i + 1] as usize;
-            output.extend(std::iter::repeat(0).take(run));
-            i += 2;
-        } else {
-            output.push(data[i]);
-            i += 1;
-        }
-    }
-
-    output
-}
-
-//^^^^old right there
-
-#[derive(Debug, Default)]
-struct Apy {
-    file_path: String,
+    FileDropped(String),
+    File,
+    Unfile
 }
 
 #[derive(Debug)]
@@ -200,6 +34,12 @@ struct ANSTable {
     total: u32,           // sum of all frequencies
 
     slot_to_sym: Vec<u8>,
+}
+
+#[derive(Debug)]
+struct Apy {
+    file_path: String,
+    table: ANSTable
 }
 
 #[derive(Debug)]
@@ -216,64 +56,82 @@ struct ANSDecoder {
 
 const L: u64 = 1 << 23;
 
-fn ANSCreateTable() {
-    
-}
+fn ANSCreateTable(freqs: Vec<u32>) -> ANSTable {
+    let total: u32 = freqs.iter().sum();
 
+    let mut cumul =  vec![0u32; freqs.len() + 1];
+    for i in 0..freqs.len() {
+        cumul[i+1] = cumul[i] + freqs[i];
+    }
+
+    let mut slots = vec![0u8; total as usize];
+    for i in 0..freqs.len() {
+        for sym in cumul[i]..cumul[i+1] {
+            slots[sym as usize] = i as u8;
+        }
+    }
+
+    ANSTable { freq: freqs, cumul, total, slot_to_sym: slots }
+}
 fn ANSEncoding(symbol: u8, encoder: &mut ANSEncoder, table: &ANSTable) {
     let m = table.total as u64;
     let freq = table.freq[symbol as usize] as u64;
     let cumul = table.cumul[symbol as usize] as u64;
 
-    let upper = ((L / freq) * freq) << 8;
+    // Normalize: shrink state until it's in the valid range
+    let upper = freq << 8; // i.e. freq * b, where b=256
     while encoder.state >= upper {
-    // Flush lowest byte to output
         encoder.output.push((encoder.state & 0xFF) as u8);
         encoder.state >>= 8;
     }
-
+    // Encode symbol into state
     encoder.state = (encoder.state / freq) * m + cumul + (encoder.state % freq);
 }
 
-fn ANSCloseEncoding(encoder: &mut ANSEncoder){
-    for _i in 0..4 {
+fn ANSCloseEncoding(encoder: &mut ANSEncoder) {
+    for _ in 0..4 {
         encoder.output.push((encoder.state & 0xFF) as u8);
         encoder.state >>= 8;
     }
-    encoder.output.reverse();
 }
 
-fn ANSDecoding(decoder: &mut ANSDecoder, table: &ANSTable) -> u8 {
-    //loading some goodies into the state first
+fn ANSDecoding(decoder: &mut ANSDecoder, table: &ANSTable) -> Vec<u8> {
+    let input = &decoder.input;
+    let m = table.total as u64;
+
+    // Load initial state from the last 4 bytes (little-endian)
+    let n = input.len();
     decoder.state = 0u64;
     for i in 0..4 {
-        decoder.state |= (decoder.input[i] as u64) << (i * 8);
+        decoder.state |= (input[n - 4 + i] as u64) << (i * 8);
     }
-    decoder.pos = 4;
+    decoder.pos = n - 5; // next byte to read, going backwards
 
-    let m = table.total as u64;
-    let slot = decoder.state % m;
-    let symbol = table.slot_to_sym[slot as usize];
+    let mut output = vec![0u8; m as usize];
+    for item in &mut output {
+        let slot = decoder.state % m;
+        *item = table.slot_to_sym[slot as usize];
+        let freq = table.freq[*item as usize] as u64;
+        let cumul = table.cumul[*item as usize] as u64;
 
-    let freq = table.freq[symbol as usize] as u64;
-    let cumul = table.cumul[symbol as usize] as u64;
+        decoder.state = freq * (decoder.state / m) + slot - cumul;
 
-    //popping the symbol out of the state
-    decoder.state = freq * (decoder.state / m) + slot - cumul;
-
-    while decoder.state < L {
-        let byte = decoder.input[decoder.pos] as u64;
-        decoder.pos += 1;
-        decoder.state = (decoder.state << 8) | byte;
+        // Renorm: read bytes backwards, shift in from top
+        while decoder.state < L {
+            decoder.state = (decoder.state << 8) | (input[decoder.pos] as u64);
+            if decoder.pos > 0 { decoder.pos -= 1; }
+        }
     }
 
-    symbol
+    output.reverse(); // ANS decodes in reverse symbol order
+    output
 }
 
 fn new() -> (Apy, Task<Message>) {
     (
         Apy {
-            file_path: String::new()
+            file_path: String::new(),
+            table: ANSTable { freq: Vec::new(), cumul: Vec::new(), total: 0, slot_to_sym: Vec::new() }
         },
         Task::none(),
     )
@@ -281,39 +139,19 @@ fn new() -> (Apy, Task<Message>) {
 
 
 //ˇˇˇˇˇˇold down there
-
-fn get_prefix(data: &Vec<u8>, index: &mut usize, bit: &mut u8) -> u8 {
-    let mut count: u8 = 0;
-    let mut prefix: u8 = 0;
-
-    let mut byte = data[*index];
-
-    while count != 3 {
-        let bit_val = (byte >> (7 - *bit)) & 1;
-        prefix = (prefix << 1) | bit_val;
-        count += 1;
-
-        *bit += 1;
-        if *bit == 8 {
-            *index += 1;
-            *bit = 0;
-            if count != 3 { byte = data[*index] }
-        }
-    }
-
-    return prefix;
-}
-
-fn decode_file(file_path: String) {
+fn decode_file(file_path: String, table: &ANSTable) {
 
     let file_data: Vec<u8> = fs::read(&file_path).expect("failed to read file");
 
-    let mut heap: VecDeque<_> = file_data.into();
-    let mut map: HashMap<u8, u8> = HashMap::new();
+    let mut decoder = ANSDecoder { state: 0, input: file_data, pos: 0};
 
-    let mut not_used: Vec<u8> = Vec::new();
-    let mut data_len: Vec<usize> = Vec::new();
+    println!("{}", table.total);
 
+    let output = ANSDecoding(&mut decoder, &table);
+
+    let output_path: String = format!("{}unlolied.jpg", file_path.split('.').next().unwrap());
+    fs::write(output_path, output).expect("cant write decoded data");
+/*
 
     //we check if its a compressed file
     let mut buf = [0u8; 4];
@@ -390,89 +228,36 @@ fn decode_file(file_path: String) {
 
     let output_path: String = format!("{}unlolied.gif", file_path.split('.').next().unwrap());
     fs::write(output_path, original).expect("cant write decoded data");
-
+*/
 }
 
-fn encode_file(file_path: String) {
+fn encode_file(file_path: String) -> ANSTable {
     let file_data: Vec<u8> = fs::read(&file_path).expect("failed to read file");
 
-    let (bwt, idx) = bwt_encode(&file_data);
-    println!("did bwt");
-    let mtf = mtf_encode(&bwt);
-    println!("did mtf");
-    let rle = rle_encode(&mtf);
-    println!("did rle");
-
-    //let block_size = 1024;
-    //let blocks: Vec<&[u8]> = file_data.chunks(block_size).collect();
+    let mut freq_table = vec![0u32; 256];
     
-/*
-    let results: Vec<(Vec<u8>, usize)> = blocks
-    .par_iter()
-    .map(|block| {
-        let (bwt, idx) = bwt_block(block);
-        let mtf = mtf_encode(&bwt);
-        let rle = rle_encode(&mtf);
-        (rle, idx)
-
-    })
-    .collect();
-*/
-
-    println!("got data: btw-{} rle-{}", bwt.len(), rle.len());
-
-
-    let mut map: HashMap<u8, u64> = HashMap::new();
-    for item in &rle {
-        *map.entry(*item).or_insert(0) += 1;
+    for item in &file_data{
+        freq_table[*item as usize] = freq_table[*item as usize] +1;
     }
-    println!("got map: {}", map.len());
-    let mut heap = BinaryHeap::new();
+
+    let table = ANSCreateTable(freq_table);
+
+    let mut encoder = ANSEncoder { state: 0, output: Vec::new() };
     
-    for (byte, freq) in map {
-        heap.push(Box::new(HuffData{ byte, freq }));
+    for item in &file_data {
+        ANSEncoding(*item, &mut encoder, &table);
     }
-    println!("got heap: {}", heap.len());
-    
 
-    let current_count: u64;
-    let mut layer: Layer = Layer {
-            encoded: HashMap::new(),
-            chunk: Chunk { block: Vec::new(), buffer: 0, bit_count: 0 },
-    };
-    current_count = fill_layer(&mut layer, &mut heap);
+    ANSCloseEncoding(&mut encoder);
 
-    println!("sum:{}", current_count);
 
-    let mut main_chunk: Chunk = Chunk { block:Vec::new(), buffer: 0, bit_count: 0 };
-    let mut left_over: Chunk = Chunk { block:Vec::new(), buffer: 0, bit_count: 0 };
+    let output_path: String = format!("{}.loli", file_path.split('.').next().unwrap());
+    fs::write(output_path, encoder.output).expect("cant write encoded data");
 
-    for byte in &rle {
-        if layer.encoded.contains_key(byte) {
-            main_chunk.buffer = (main_chunk.buffer << 1) | 1;
-            main_chunk.bit_count += 1;
-            if main_chunk.bit_count == 8 {
-                main_chunk.block.push(main_chunk.buffer);
-                main_chunk.buffer = 0;
-                main_chunk.bit_count = 0;
-            }
-            
-            encode_onto_layer(&mut layer, byte);
-        }
-        else {
-            main_chunk.buffer = main_chunk.buffer << 1;
-            main_chunk.bit_count += 1;
-            if main_chunk.bit_count == 8 {
-                main_chunk.block.push(main_chunk.buffer);
-                main_chunk.buffer = 0;
-                main_chunk.bit_count = 0;
-            }
-            left_over.block.push(*byte);
-        }
-    }
+    table
     
     //outputing
-
+/*
     let mut output: Vec<u8> = Vec::new();
     output.extend_from_slice("LOLI".as_bytes());
 
@@ -505,35 +290,8 @@ fn encode_file(file_path: String) {
     output.extend_from_slice(&main_chunk.block);
     output.extend_from_slice(&layer.chunk.block);
     output.extend_from_slice(&left_over.block);
-
-    let output_path: String = format!("{}.loli", file_path.split('.').next().unwrap());
-    fs::write(output_path, output).expect("cant write encoded data");
+*/
 }
-
-fn fill_layer(layer: &mut Layer, heap: &mut BinaryHeap<Box<HuffData>>) -> u64{
-    let mut freq_sum = 0;
-    for i in 0..8 {
-        let node: HuffData = *heap.pop().unwrap();
-        print!("{}; ", node.freq);
-        layer.encoded.insert(node.byte, i);
-        freq_sum += node.freq;
-    }
-    freq_sum
-}
-
-fn encode_onto_layer(layer: &mut Layer, data: &u8) {
-    let prefix = layer.encoded[data];
-    for i in (0..3).rev() {
-        layer.chunk.buffer = (layer.chunk.buffer << 1) | ((prefix >> i) & 1);
-        layer.chunk.bit_count += 1;
-        if layer.chunk.bit_count == 8 {
-            layer.chunk.block.push(layer.chunk.buffer);
-            layer.chunk.buffer = 0;
-            layer.chunk.bit_count = 0;
-        }
-    }
-}
-
 
 
 // ui stuff
@@ -543,24 +301,42 @@ fn update(api: &mut Apy, message: Message) {
         Message::FileDropped(path) => {
             api.file_path = path;
             if api.file_path.split('.').last().unwrap() == "loli" {
-                decode_file(api.file_path.clone());
+                decode_file(api.file_path.clone(), &api.table);
             } else {
-                encode_file(api.file_path.clone());
+                api.table = encode_file(api.file_path.clone());
             }
         }
-        Message::None => {}
+        Message::File => {
+            if let Some(path) = FileDialog::new().pick_file() {
+                api.file_path = path.to_string_lossy().to_string();
+                api.table = encode_file(api.file_path.clone());
+                println!("{} total freqs", api.table.total);
+            }
+        }
+        Message::Unfile => {
+            if let Some(path) = FileDialog::new().pick_file() {
+                api.file_path = path.to_string_lossy().to_string();
+                decode_file(api.file_path.clone(), &api.table);
+            }
+        }
+        _ => {}
     }
 }
 fn view(api: &Apy) -> Element<'_, Message> {
     let text = Text::new(&api.file_path);
+    let button_text = Text::new("Ola amigo");
+    let decode_text: Text = Text::new("si senyore");
+    let button = Button::new(button_text).on_press(Message::File);
+    let d_button = Button::new(decode_text).on_press(Message::Unfile);
     let children = [
-        container(text)
+        container(
+            column([text.into(), button.into(), d_button.into()]))
             .width(Length::Fill)
             .height(Length::FillPortion(4))
             .align_x(alignment::Horizontal::Center)
             .align_y(alignment::Vertical::Center)
             .style(|_theme| container::Style::default().background(Background::Color(Color::from_rgb(0.0, 0.0, 0.0))).color(Color::from_rgb(1.0, 0.0, 1.0)))
-            .into()
+            .into(),
     ];
     column(children).into()
 }
