@@ -1,15 +1,8 @@
-use std::collections::{BinaryHeap, HashMap};
-use std::collections::VecDeque;
 use std::{fs};
-use std::cmp::{Ordering};
 
-use iced::futures::stream::ForEach;
 use iced::{Background, Color, Element, Length, alignment, Task, Event, Subscription, event, window};
 use iced::widget::{Button, Text, button, column, container, row};
 
-use libsais::bwt::Bwt;
-use libsais::typestate::OwnedBuffer;
-use libsais::{BwtConstruction, ThreadCount};
 use rfd::FileDialog;
 
 fn main() -> iced::Result {
@@ -116,10 +109,10 @@ fn ANSDecoding(decoder: &mut ANSDecoder, table: &ANSTable) -> Vec<u8> {
 
         decoder.state = freq * (decoder.state / m) + slot - cumul;
 
-        // Renorm: read bytes backwards, shift in from top
-        while decoder.state < L {
+        while decoder.state < m {
             decoder.state = (decoder.state << 8) | (input[decoder.pos] as u64);
             if decoder.pos > 0 { decoder.pos -= 1; }
+            else { break; }
         }
     }
 
@@ -145,7 +138,7 @@ fn decode_file(file_path: String, table: &ANSTable) {
 
     let mut decoder = ANSDecoder { state: 0, input: file_data, pos: 0};
 
-    println!("{}", table.total);
+    println!("{} table total, {} table slots", table.total, table.slot_to_sym[0]);
 
     let output = ANSDecoding(&mut decoder, &table);
 
@@ -242,7 +235,7 @@ fn encode_file(file_path: String) -> ANSTable {
 
     let table = ANSCreateTable(freq_table);
 
-    let mut encoder = ANSEncoder { state: 0, output: Vec::new() };
+    let mut encoder = ANSEncoder { state: table.total as u64, output: Vec::new() };
     
     for item in &file_data {
         ANSEncoding(*item, &mut encoder, &table);
@@ -250,6 +243,7 @@ fn encode_file(file_path: String) -> ANSTable {
 
     ANSCloseEncoding(&mut encoder);
 
+    println!("{} table total, {} file size", table.total, file_data.len());
 
     let output_path: String = format!("{}.loli", file_path.split('.').next().unwrap());
     fs::write(output_path, encoder.output).expect("cant write encoded data");
